@@ -7,7 +7,7 @@
 // Local logging tag
 static const char TAG[] = "wifi";
 
-typedef enum { ANTENNA_INT = 0, ANTENNA_EXT } antenna_type_t;
+typedef enum { ANTENNA_INT = 0, ANTENNA_EXT = 1 } antenna_type_t;
 
 void antenna_init(void) {
   gpio_config_t gpioconf = {.pin_bit_mask = 1ull << HAS_ANTENNA_SWITCH,
