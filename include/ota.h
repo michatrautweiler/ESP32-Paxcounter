@@ -4,8 +4,6 @@
 #ifdef USE_OTA
 
 #include "globals.h"
-#include "battery.h"
-//#include "update.h"
 #include <Update.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>

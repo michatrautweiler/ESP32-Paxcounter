@@ -64,7 +64,7 @@ void process_timesync_req(void *taskparameter) {
 
     // wait until we are joined if we are not
     while (!LMIC.devaddr) {
-      vTaskDelay(5000);
+      vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
     // collect timestamp samples
@@ -106,17 +106,12 @@ void process_timesync_req(void *taskparameter) {
         payload.addByte(0x99);
         SendPayload(RCMDPORT, prio_high);
         // ...send a alive open a receive window for last time_sync_answer
-        // LMIC_sendAlive();
+        LMIC_sendAlive();
       }
     } // end of for loop to collect timestamp samples
 
-    // begin of time critical section: lock app irq's and I2C bus
-    if (!mask_user_IRQ()) {
-      ESP_LOGW(TAG,
-               "[%0.3f] Timesync handshake error: irq / i2c masking failed",
-               millis() / 1000.0);
-      goto finish; // failure
-    }
+    // mask application irq to ensure accurate timing
+    mask_user_IRQ();
 
     // average time offset over all collected diffs
     time_offset_ms /= TIME_SYNC_SAMPLES;
@@ -133,13 +128,12 @@ void process_timesync_req(void *taskparameter) {
     // calculate fraction milliseconds
     time_to_set_fraction_msec = (uint16_t)(time_offset_ms.count() % 1000);
 
-    setMyTime(time_to_set, time_to_set_fraction_msec);
-
-    // end of time critical section: release I2C bus and re-enable app irq's
-    unmask_user_IRQ();
+    setMyTime(time_to_set, time_to_set_fraction_msec, _lora);
 
   finish:
+    // end of time critical section: release app irq lock
     timeSyncPending = false;
+    unmask_user_IRQ();
 
   } // infinite while(1)
 }
@@ -160,7 +154,7 @@ void store_time_sync_req(uint32_t timestamp) {
 }
 
 // process timeserver timestamp answer, called from lorawan.cpp
-int recv_timesync_ans(uint8_t seq_no, uint8_t buf[], uint8_t buf_len) {
+int recv_timesync_ans(const uint8_t seq_no, const uint8_t buf[], const uint8_t buf_len) {
 
   // if no timesync handshake is pending then exit
   if (!timeSyncPending)
@@ -180,17 +174,17 @@ int recv_timesync_ans(uint8_t seq_no, uint8_t buf[], uint8_t buf_len) {
   else { // we received a probably valid time frame
 
     uint8_t k = seq_no % TIME_SYNC_SAMPLES;
-    uint16_t timestamp_msec; // convert 1/250th sec fractions to ms
-    uint32_t timestamp_sec;
-
-    // fetch timeserver time from 4 bytes containing the UTC seconds since
-    // unix epoch. Octet order is big endian. Casts are necessary, because buf
-    // is an array of single byte values, and they might overflow when shifted
-    timestamp_sec = ((uint32_t)buf[3]) | (((uint32_t)buf[2]) << 8) |
-                    (((uint32_t)buf[1]) << 16) | (((uint32_t)buf[0]) << 24);
 
     // the 5th byte contains the fractional seconds in 2^-8 second steps
-    timestamp_msec = 4 * buf[4];
+    // (= 1/250th sec), we convert this to ms
+    uint16_t timestamp_msec = 4 * buf[4];
+    // pointers to 4 bytes containing UTC seconds since unix epoch, msb
+    uint32_t timestamp_sec, *timestamp_ptr;
+
+    // convert buffer to uint32_t, octet order is big endian
+    timestamp_ptr = (uint32_t *)buf;
+    // swap byte order from msb to lsb, note: this is platform dependent
+    timestamp_sec = __builtin_bswap32(*timestamp_ptr);
 
     // construct the timepoint when message was seen on gateway
     time_sync_rx[k] += seconds(timestamp_sec) + milliseconds(timestamp_msec);
@@ -213,43 +207,8 @@ int recv_timesync_ans(uint8_t seq_no, uint8_t buf[], uint8_t buf_len) {
   }
 }
 
-// adjust system time, calibrate RTC and RTC_INT pps
-void IRAM_ATTR setMyTime(uint32_t t_sec, uint16_t t_msec) {
-
-  time_t time_to_set = (time_t)(t_sec + 1);
-
-  ESP_LOGD(TAG, "[%0.3f] Calculated UTC epoch time: %d.%03d sec",
-           millis() / 1000.0, time_to_set, t_msec);
-
-  if (timeIsValid(time_to_set)) {
-
-    // wait until top of second with millisecond precision
-    vTaskDelay(pdMS_TO_TICKS(1000 - t_msec));
-
-// set RTC time and calibrate RTC_INT pulse on top of second
-#ifdef HAS_RTC
-    set_rtctime(time_to_set, no_mutex);
-#endif
-
-// sync pps timer to top of second
-#if (!defined GPS_INT && !defined RTC_INT)
-    timerWrite(ppsIRQ, 0); // reset pps timer
-    CLOCKIRQ();            // fire clock pps, this advances time 1 sec
-#endif
-
-    setTime(time_to_set); // set the time on top of second
-
-    timeSource = _lora;
-    timesyncer.attach(TIME_SYNC_INTERVAL * 60, timeSync); // regular repeat
-    ESP_LOGI(TAG, "[%0.3f] Timesync finished, time was adjusted",
-             millis() / 1000.0);
-  } else
-    ESP_LOGW(TAG, "[%0.3f] Timesync failed, outdated time calculated",
-             millis() / 1000.0);
-}
-
+// create task for timeserver handshake processing, called from main.cpp
 void timesync_init() {
-  // create task for timeserver handshake processing, called from main.cpp
   xTaskCreatePinnedToCore(process_timesync_req, // task function
                           "timesync_req",       // name of task
                           2048,                 // stack size of task

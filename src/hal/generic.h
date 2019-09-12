@@ -1,4 +1,6 @@
 // clang-format off
+// upload_speed 115200
+// board esp32dev
 
 #ifndef _GENERIC_H
 #define _GENERIC_H
@@ -49,13 +51,11 @@
 
 #define HAS_LED (21) // on board  LED
 #define HAS_BUTTON (39) // on board button
-#define HAS_RGB_LED (0) // WS2812B RGB LED on GPIO0
-
-#define BOARD_HAS_PSRAM // use extra 4MB extern RAM
+#define HAS_RGB_LED SmartLed rgb_led(LED_WS2812, 1, GPIO_NUM_0) // WS2812B RGB LED on GPIO0
 
 // GPS settings
 #define HAS_GPS 1 // use on board GPS
-#define GPS_SERIAL 9600, SERIAL_8N1, GPIO_NUM_12, GPIO_NUM_15 // UBlox NEO 6M
+#define GPS_SERIAL 9600, SERIAL_8N1, GPIO_NUM_12, GPIO_NUM_15 // UBlox NEO 6M RX, TX
 #define GPS_INT GPIO_NUM_13 // 30ns accurary timepulse, to be external wired on pcb: NEO 6M Pin#3 -> GPIO13
 
 // Pins for I2C interface of OLED Display

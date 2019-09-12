@@ -47,21 +47,23 @@ IRAM_ATTR void wifi_sniffer_packet_handler(void *buff,
 
 // Software-timer driven Wifi channel rotation callback function
 void switchWifiChannel(TimerHandle_t xTimer) {
-    channel =
-        (channel % WIFI_CHANNEL_MAX) + 1; // rotate channel 1..WIFI_CHANNEL_MAX
-    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-  }
+  channel =
+      (channel % WIFI_CHANNEL_MAX) + 1; // rotate channel 1..WIFI_CHANNEL_MAX
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+}
 
 void wifi_sniffer_init(void) {
   wifi_init_config_t wificfg = WIFI_INIT_CONFIG_DEFAULT();
   wificfg.nvs_enable = 0;        // we don't need any wifi settings from NVRAM
   wificfg.wifi_task_core_id = 0; // we want wifi task running on core 0
-  wifi_promiscuous_filter_t filter = {
-      // .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT}; // only MGMT frames
-      .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL}; // we use all frames
 
-  ESP_ERROR_CHECK(esp_coex_preference_set(
-      ESP_COEX_PREFER_BALANCE)); // configure Wifi/BT coexist lib
+  // wifi_promiscuous_filter_t filter = {
+  //    .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT}; // only MGMT frames
+  // .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL}; // we use all frames
+
+  wifi_promiscuous_filter_t filter = {.filter_mask =
+                                          WIFI_PROMIS_FILTER_MASK_MGMT |
+                                          WIFI_PROMIS_FILTER_MASK_DATA};
 
   ESP_ERROR_CHECK(esp_wifi_init(&wificfg)); // configure Wifi with cfg
   ESP_ERROR_CHECK(
@@ -69,9 +71,8 @@ void wifi_sniffer_init(void) {
   ESP_ERROR_CHECK(
       esp_wifi_set_storage(WIFI_STORAGE_RAM)); // we don't need NVRAM
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-  ESP_ERROR_CHECK(esp_wifi_stop());
-  ESP_ERROR_CHECK(
-      esp_wifi_set_promiscuous_filter(&filter)); // set MAC frame filter
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // no modem power saving
+  ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filter)); // set frame filter
   ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet_handler));
   ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true)); // now switch on monitor mode
 

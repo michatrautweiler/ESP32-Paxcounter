@@ -1,4 +1,5 @@
 #include "timekeeper.h"
+#include "paxcounter.conf"
 
 #if !(HAS_LORA)
 #if (TIME_SYNC_LORASERVER)
@@ -18,39 +19,21 @@ const char timeSetSymbols[] = {'G', 'R', 'L', '?'};
 HardwareSerial IF482(2); // use UART #2 (#1 may be in use for serial GPS)
 #endif
 
-#if (HAS_GPS)
-static gpsStatus_t gps_pps_status;
-#endif
-
 Ticker timesyncer;
 
 void timeSync() { xTaskNotify(irqHandlerTask, TIMESYNC_IRQ, eSetBits); }
 
-time_t timeProvider(void) {
+void calibrateTime(void) {
 
   time_t t = 0;
+  uint16_t t_msec = 0;
 
 #if (HAS_GPS)
-  // fetch recent time from last NEMA record
-  t = get_gpstime(gps_pps_status);
+  // fetch recent time from last NMEA record
+  t = fetch_gpsTime(&t_msec);
   if (t) {
-#ifdef HAS_RTC
-    set_rtctime(t, do_mutex); // calibrate RTC
-#endif
     timeSource = _gps;
-    timesyncer.attach(TIME_SYNC_INTERVAL * 60, timeSync); // regular repeat
-    ESP_LOGD(TAG, "GPS time = %d", t);
-    return t;
-  }
-#endif
-
-// no GPS -> fallback to RTC time while trying lora sync
-#ifdef HAS_RTC
-  t = get_rtctime();
-  if (t) {
-    timeSource = _rtc;
-    timesyncer.attach(TIME_SYNC_INTERVAL_RETRY * 60, timeSync); // short retry
-    ESP_LOGD(TAG, "RTC time = %d", t);
+    goto finish;
   }
 #endif
 
@@ -62,14 +45,72 @@ time_t timeProvider(void) {
   LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
 #endif
 
-  if (!t) {
-    timeSource = _unsynced;
-    timesyncer.attach(TIME_SYNC_INTERVAL_RETRY * 60, timeSync); // short retry
+// no time from GPS -> fallback to RTC time while trying lora sync
+#ifdef HAS_RTC
+  t = get_rtctime();
+  if (t) {
+    timeSource = _rtc;
+    goto finish;
   }
+#endif
 
-  return t;
+  goto finish;
 
-} // timeProvider()
+finish:
+
+  setMyTime((uint32_t)t, t_msec, timeSource); // set time
+
+} // calibrateTime()
+
+// adjust system time, calibrate RTC and RTC_INT pps
+void IRAM_ATTR setMyTime(uint32_t t_sec, uint16_t t_msec,
+                         timesource_t mytimesource) {
+
+  // called with invalid timesource?
+  if (mytimesource == _unsynced)
+    return;
+
+  // increment t_sec only if t_msec > 1000
+  time_t time_to_set = (time_t)(t_sec + t_msec / 1000);
+
+  // do we have a valid time?
+  if (timeIsValid(time_to_set)) {
+
+    // if we have msec fraction, then wait until top of second with
+    // millisecond precision
+    if (t_msec % 1000) {
+      time_to_set++;
+      vTaskDelay(pdMS_TO_TICKS(1000 - t_msec % 1000));
+    }
+
+    ESP_LOGD(TAG, "[%0.3f] UTC epoch time: %d.%03d sec", millis() / 1000.0,
+             time_to_set, t_msec % 1000);
+
+// if we have got an external timesource, set RTC time and shift RTC_INT pulse
+// to top of second
+#ifdef HAS_RTC
+    if ((mytimesource == _gps) || (mytimesource == _lora))
+      set_rtctime(time_to_set);
+#endif
+
+// if we have a software pps timer, shift it to top of second
+#if (!defined GPS_INT && !defined RTC_INT)
+    timerWrite(ppsIRQ, 0); // reset pps timer
+    CLOCKIRQ();            // fire clock pps, this advances time 1 sec
+#endif
+
+    setTime(time_to_set); // set the time on top of second
+
+    timeSource = mytimesource; // set global variable
+    timesyncer.attach(TIME_SYNC_INTERVAL * 60, timeSync);
+    ESP_LOGI(TAG, "[%0.3f] Timesync finished, time was set | source: %c",
+             millis() / 1000.0, timeSetSymbols[timeSource]);
+  } else {
+    timesyncer.attach(TIME_SYNC_INTERVAL_RETRY * 60, timeSync);
+    ESP_LOGI(TAG, "[%0.3f] Timesync failed, invalid time fetched | source: %c",
+             millis() / 1000.0, timeSetSymbols[timeSource]);
+  }
+}
 
 // helper function to setup a pulse per second for time synchronisation
 uint8_t timepulse_init() {
@@ -123,11 +164,6 @@ void timepulse_start(void) {
   timerAlarmEnable(ppsIRQ);
 #endif
 
-// initialize gps time
-#if (HAS_GPS)
-  gps_storetime(gps_pps_status);
-#endif
-
   // start cyclic time sync
   timeSync(); // init systime by RTC or GPS or LORA
   timesyncer.attach(TIME_SYNC_INTERVAL * 60, timeSync);
@@ -139,11 +175,6 @@ void IRAM_ATTR CLOCKIRQ(void) {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
   SyncToPPS(); // advance systime, see microTime.h
-
-  // store recent gps time, if we have gps
-#if (HAS_GPS)
-  gps_storetime(gps_pps_status);
-#endif
 
 // advance wall clock, if we have
 #if (defined HAS_IF482 || defined HAS_DCF77)
@@ -218,11 +249,13 @@ void clock_init(void) {
 void clock_loop(void *taskparameter) { // ClockTask
 
   // caveat: don't use now() in this task, it will cause a race condition
-  // due to concurrent access to i2c bus for setting rtc!
+  // due to concurrent access to i2c bus when reading/writing from/to rtc chip!
 
 #define nextmin(t) (t + DCF77_FRAME_SIZE + 1) // next minute
 
+#ifdef HAS_TWO_LED
   static bool led1_state = false;
+#endif
   uint32_t printtime;
   time_t t = *((time_t *)taskparameter), last_printtime = 0; // UTC time seconds
 

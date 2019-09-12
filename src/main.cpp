@@ -33,16 +33,13 @@ IDLE          0     0     ESP32 arduino scheduler -> runs wifi sniffer
 
 clockloop     1     4     generates realtime telegrams for external clock
 timesync_req  1     3     processes realtime time sync requests
-irqhandler    1     2     display, timesync, gps, etc. triggered by timers
-gpsloop       1     2     reads data from GPS via serial or i2c
-bmeloop       1     1     reads data from BME sensor via i2c
-looptask      1     1     runs the LMIC LoRa stack (arduino loop)
+lmictask      1     2     MCCI LMiC LORAWAN stack
+irqhandler    1     1     display, timesync, gps, etc. triggered by timers
+gpsloop       1     1     reads data from GPS via serial or i2c
+lorasendtask  1     1     feed data from lora sendqueue to lmcic
 IDLE          1     0     ESP32 arduino scheduler -> runs wifi channel rotator
 
 Low priority numbers denote low priority tasks.
-
-Tasks using i2c bus all must have same priority, because using mutex semaphore
-(irqhandler, bmeloop)
 
 NOTE: Changing any timings will have impact on time accuracy of whole code.
 So don't do it if you do not own a digital oscilloscope.
@@ -51,8 +48,7 @@ So don't do it if you do not own a digital oscilloscope.
 -------------------------------------------------------------------------------
 0	displayIRQ -> display refresh -> 40ms (DISPLAYREFRESH_MS)
 1 ppsIRQ -> pps clock irq -> 1sec
-2	gpsIRQ -> gps store data -> 300ms
-3	unused
+3	MatrixDisplayIRQ -> matrix mux cycle -> 0,5ms (MATRIX_DISPLAY_SCAN_US)
 
 
 // Interrupt routines
@@ -61,13 +57,13 @@ So don't do it if you do not own a digital oscilloscope.
 fired by hardware
 DisplayIRQ      -> esp32 timer 0  -> irqHandlerTask (Core 1)
 CLOCKIRQ        -> esp32 timer 1  -> ClockTask (Core 1)
-GpsIRQ          -> esp32 timer 2  -> irqHandlerTask (Core 1)
 ButtonIRQ       -> external gpio  -> irqHandlerTask (Core 1)
 
 fired by software (Ticker.h)
 TIMESYNC_IRQ    -> timeSync()     -> irqHandlerTask (Core 1)
 CYLCIC_IRQ      -> housekeeping() -> irqHandlerTask (Core 1)
 SENDCYCLE_IRQ   -> sendcycle()    -> irqHandlerTask (Core 1)
+BME_IRQ         -> bmecycle()     -> irqHandlerTask (Core 1)
 
 
 // External RTC timer (if present)
@@ -85,12 +81,11 @@ uint8_t volatile channel = 0;              // channel rotation counter
 uint16_t volatile macs_total = 0, macs_wifi = 0, macs_ble = 0,
                   batt_voltage = 0; // globals for display
 
-hw_timer_t *ppsIRQ = NULL, *displayIRQ = NULL, *gpsIRQ = NULL;
+hw_timer_t *ppsIRQ = NULL, *displayIRQ = NULL, *matrixDisplayIRQ = NULL;
 
 TaskHandle_t irqHandlerTask = NULL, ClockTask = NULL;
 SemaphoreHandle_t I2Caccess;
 bool volatile TimePulseTick = false;
-time_t volatile gps_pps_time = 0;
 time_t userUTCTime = 0;
 timesource_t timeSource = _unsynced;
 
@@ -115,10 +110,10 @@ void setup() {
 
   // create some semaphores for syncing / mutexing tasks
   I2Caccess = xSemaphoreCreateMutex(); // for access management of i2c bus
-  if (I2Caccess)
-    xSemaphoreGive(I2Caccess); // Flag the i2c bus available for use
+  assert(I2Caccess != NULL);
+  I2C_MUTEX_UNLOCK();
 
-    // disable brownout detection
+  // disable brownout detection
 #ifdef DISABLE_BROWNOUT
   // register with brownout is at address DR_REG_RTCCNTL_BASE + 0xd4
   (*((uint32_t volatile *)ETS_UNCACHED_ADDR((DR_REG_RTCCNTL_BASE + 0xd4)))) = 0;
@@ -174,22 +169,43 @@ void setup() {
   ESP_LOGI(TAG, "TinyGPS+ version %s", TinyGPSPlus::libraryVersion());
 #endif
 
+// open i2c bus
+#ifdef HAS_DISPLAY
+  Wire.begin(MY_OLED_SDA, MY_OLED_SCL, 100000);
+#else
+  Wire.begin(SDA, SCL, 100000);
+#endif
+
+// setup power on boards with power management logic
+#ifdef EXT_POWER_SW
+  pinMode(EXT_POWER_SW, OUTPUT);
+  digitalWrite(EXT_POWER_SW, EXT_POWER_ON);
+  strcat_P(features, " VEXT");
+#endif
+#ifdef HAS_PMU
+  AXP192_init();
+  strcat_P(features, " PMU");
+#endif
+
+  // scan i2c bus for devices
+  i2c_scan();
+
 #endif // verbose
 
   // read (and initialize on first run) runtime settings from NVRAM
   loadConfig(); // includes initialize if necessary
 
+// initialize display
+#ifdef HAS_DISPLAY
+  strcat_P(features, " OLED");
+  DisplayIsOn = cfg.screenon;
+  init_display(PRODUCTNAME, PROGVERSION); // note: blocking call
+#endif
+
 #ifdef BOARD_HAS_PSRAM
   assert(psramFound());
   ESP_LOGI(TAG, "PSRAM found and initialized");
   strcat_P(features, " PSRAM");
-#endif
-
-// set external power mode
-#ifdef EXT_POWER_SW
-  pinMode(EXT_POWER_SW, OUTPUT);
-  digitalWrite(EXT_POWER_SW, EXT_POWER_ON);
-  strcat_P(features, " VEXT");
 #endif
 
 #ifdef BAT_MEASURE_EN
@@ -200,17 +216,25 @@ void setup() {
 #if (HAS_LED != NOT_A_PIN)
   pinMode(HAS_LED, OUTPUT);
   strcat_P(features, " LED");
+
+#ifdef LED_POWER_SW
+  pinMode(LED_POWER_SW, OUTPUT);
+  digitalWrite(LED_POWER_SW, LED_POWER_ON);
+#endif
+
 #ifdef HAS_TWO_LED
   pinMode(HAS_TWO_LED, OUTPUT);
   strcat_P(features, " LED1");
 #endif
+
 // use LED for power display if we have additional RGB LED, else for status
 #ifdef HAS_RGB_LED
   switch_LED(LED_ON);
   strcat_P(features, " RGB");
   rgb_set_color(COLOR_PINK);
 #endif
-#endif
+
+#endif // HAS_LED
 
 #if (HAS_LED != NOT_A_PIN) || defined(HAS_RGB_LED)
   // start led loop
@@ -232,7 +256,7 @@ void setup() {
 #endif
 
 // initialize battery status
-#ifdef BAT_MEASURE_ADC
+#if (defined BAT_MEASURE_ADC || defined HAS_PMU)
   strcat_P(features, " BATT");
   calibrate_voltage();
   batt_voltage = read_voltage();
@@ -261,23 +285,9 @@ void setup() {
   // remove bluetooth stack to gain more free memory
   btStop();
   ESP_ERROR_CHECK(esp_bt_mem_release(ESP_BT_MODE_BTDM));
-  ESP_ERROR_CHECK(esp_coex_preference_set((
-      esp_coex_prefer_t)ESP_COEX_PREFER_WIFI)); // configure Wifi/BT coexist lib
+  ESP_ERROR_CHECK(esp_coex_preference_set(
+      ESP_COEX_PREFER_WIFI)); // configure Wifi/BT coexist lib
 #endif
-
-// initialize button
-#ifdef HAS_BUTTON
-  strcat_P(features, " BTN_");
-#ifdef BUTTON_PULLUP
-  strcat_P(features, "PU");
-  // install button interrupt (pullup mode)
-  pinMode(HAS_BUTTON, INPUT_PULLUP);
-#else
-  strcat_P(features, "PD");
-  // install button interrupt (pulldown mode)
-  pinMode(HAS_BUTTON, INPUT_PULLDOWN);
-#endif // BUTTON_PULLUP
-#endif // HAS_BUTTON
 
 // initialize gps
 #if (HAS_GPS)
@@ -288,7 +298,7 @@ void setup() {
                             "gpsloop", // name of task
                             2048,      // stack size of task
                             (void *)1, // parameter of the task
-                            2,         // priority of the task
+                            1,         // priority of the task
                             &GpsTask,  // task handle
                             1);        // CPU core
   }
@@ -313,14 +323,14 @@ void setup() {
 #endif
 
 #if (VENDORFILTER)
-  strcat_P(features, " OUIFLT");
+  strcat_P(features, " FILTER");
 #endif
 
-// initialize display
-#ifdef HAS_DISPLAY
-  strcat_P(features, " OLED");
-  DisplayIsOn = cfg.screenon;
-  init_display(PRODUCTNAME, PROGVERSION); // note: blocking call
+// initialize matrix display
+#ifdef HAS_MATRIX_DISPLAY
+  strcat_P(features, " LED_MATRIX");
+  MatrixDisplayIsOn = cfg.screenon;
+  init_matrix_display(); // note: blocking call
 #endif
 
 // show payload encoder
@@ -364,9 +374,6 @@ void setup() {
   esp_wifi_deinit();
 #endif
 
-  // show compiled features
-  ESP_LOGI(TAG, "Features:%s", features);
-
   // start state machine
   ESP_LOGI(TAG, "Starting Interrupt Handler...");
   xTaskCreatePinnedToCore(irqHandler,      // task function
@@ -384,16 +391,8 @@ void setup() {
 #elif defined HAS_BME280
   strcat_P(features, " BME280");
 #endif
-  if (bme_init()) {
+  if (bme_init())
     ESP_LOGI(TAG, "Starting BME sensor...");
-    xTaskCreatePinnedToCore(bme_loop,  // task function
-                            "bmeloop", // name of task
-                            2048,      // stack size of task
-                            (void *)1, // parameter of the task
-                            1,         // priority of the task
-                            &BmeTask,  // task handle
-                            1);        // CPU core
-  }
 #endif
 
   // starting timers and interrupts
@@ -410,32 +409,41 @@ void setup() {
   timerAlarmEnable(displayIRQ);
 #endif
 
- // gps buffer read interrupt
-#if (HAS_GPS)
-  gpsIRQ = timerBegin(2, 80, true);
-  timerAttachInterrupt(gpsIRQ, &GpsIRQ, true);
-  timerAlarmWrite(gpsIRQ, 300 * 1000, true);
-  timerAlarmEnable(gpsIRQ);
+  // LED Matrix display interrupt
+#ifdef HAS_MATRIX_DISPLAY
+  // https://techtutorialsx.com/2017/10/07/esp32-arduino-timer-interrupts/
+  // prescaler 80 -> divides 80 MHz CPU freq to 1 MHz, timer 3, count up
+  matrixDisplayIRQ = timerBegin(3, 80, true);
+  timerAttachInterrupt(matrixDisplayIRQ, &MatrixDisplayIRQ, true);
+  timerAlarmWrite(matrixDisplayIRQ, MATRIX_DISPLAY_SCAN_US, true);
+  timerAlarmEnable(matrixDisplayIRQ);
 #endif
+
+  // initialize button
+#ifdef HAS_BUTTON
+  strcat_P(features, " BTN_");
+#ifdef BUTTON_PULLUP
+  strcat_P(features, "PU");
+#else
+  strcat_P(features, "PD");
+#endif // BUTTON_PULLUP
+  button_init(HAS_BUTTON);
+#endif // HAS_BUTTON
 
   // cyclic function interrupts
   sendcycler.attach(SENDCYCLE * 2, sendcycle);
   housekeeper.attach(HOMECYCLE, housekeeping);
-
-// button interrupt
-#ifdef HAS_BUTTON
-#ifdef BUTTON_PULLUP
-  attachInterrupt(digitalPinToInterrupt(HAS_BUTTON), ButtonIRQ, RISING);
-#else
-  attachInterrupt(digitalPinToInterrupt(HAS_BUTTON), ButtonIRQ, FALLING);
-#endif
-#endif // HAS_BUTTON
 
 #if (TIME_SYNC_INTERVAL)
 
 #if (!(TIME_SYNC_LORAWAN) && !(TIME_SYNC_LORASERVER) && !defined HAS_GPS &&    \
      !defined HAS_RTC)
 #warning you did not specify a time source, time will not be synched
+#endif
+
+// initialize gps time
+#if (HAS_GPS)
+  fetch_gpsTime();
 #endif
 
 #if (defined HAS_IF482 || defined HAS_DCF77)
@@ -453,15 +461,11 @@ void setup() {
 
 #endif // TIME_SYNC_INTERVAL
 
+  // show compiled features
+  ESP_LOGI(TAG, "Features:%s", features);
+
+  vTaskDelete(NULL);
+
 } // setup()
 
-void loop() {
-
-  while (1) {
-#if (HAS_LORA)
-    os_runloop_once(); // execute lmic scheduled jobs and events
-#else
-    delay(2); // yield to CPU
-#endif
-  }
-}
+void loop() { vTaskDelete(NULL); }

@@ -5,14 +5,19 @@
 // Local logging tag
 static const char TAG[] = __FILE__;
 
+// we use NMEA $GPZDA sentence field 1 for time synchronization
+// $GPZDA gives time for preceding pps pulse, but does not has a constant offset
 TinyGPSPlus gps;
-gpsStatus_t gps_status;
+TinyGPSCustom gpstime(gps, "GPZDA", 1); // field 1 = UTC time
+static const String ZDA_Request = "$EIGPQ,ZDA*39\r\n";
+
+gpsStatus_t gps_status = {0};
 TaskHandle_t GpsTask;
 
 #ifdef GPS_SERIAL
 HardwareSerial GPS_Serial(1); // use UART #1
 static uint16_t nmea_txDelay_ms =
-    tx_Ticks(NMEA_FRAME_SIZE, GPS_SERIAL) / portTICK_PERIOD_MS;
+    (tx_Ticks(NMEA_FRAME_SIZE, GPS_SERIAL) / portTICK_PERIOD_MS);
 #else
 static uint16_t nmea_txDelay_ms = 0;
 #endif
@@ -27,7 +32,7 @@ int gps_init(void) {
     return 0;
   }
 
-#if defined GPS_SERIAL
+#ifdef GPS_SERIAL
   GPS_Serial.begin(GPS_SERIAL);
   ESP_LOGI(TAG, "Using serial GPS");
 #elif defined GPS_I2C
@@ -55,59 +60,76 @@ int gps_config() {
   int rslt = 1; // success
 #if defined GPS_SERIAL
 
-  /* to come */
+  /* insert user configuration here, if needed */
 
 #elif defined GPS_I2C
 
-  /* to come */
+  /* insert user configuration here, if needed */
 
 #endif
   return rslt;
 }
 
 // store current GPS location data in struct
-void gps_storelocation(gpsStatus_t &gps_store) {
-  gps_store.latitude = (int32_t)(gps.location.lat() * 1e6);
-  gps_store.longitude = (int32_t)(gps.location.lng() * 1e6);
-  gps_store.satellites = (uint8_t)gps.satellites.value();
-  gps_store.hdop = (uint16_t)gps.hdop.value();
-  gps_store.altitude = (int16_t)gps.altitude.meters();
-}
-
-// store current GPS timedate in struct
-void IRAM_ATTR gps_storetime(gpsStatus_t &gps_store) {
-
-  gps_store.time_age = gps.time.age();
-
-  if (gps.time.isValid() && gps.date.isValid() && (gps_store.time_age < 1000)) {
-    gps_store.timedate.Year =
-        CalendarYrToTm(gps.date.year()); // year offset from 1970 in microTime.h
-    gps_store.timedate.Month = gps.date.month();
-    gps_store.timedate.Day = gps.date.day();
-    gps_store.timedate.Hour = gps.time.hour();
-    gps_store.timedate.Minute = gps.time.minute();
-    gps_store.timedate.Second = gps.time.second();
-  } else
-    gps_store.timedate = {0};
+void gps_storelocation(gpsStatus_t *gps_store) {
+  if (gps.location.isUpdated() && gps.location.isValid() &&
+      (gps.location.age() < 1500)) {
+    gps_store->latitude = (int32_t)(gps.location.lat() * 1e6);
+    gps_store->longitude = (int32_t)(gps.location.lng() * 1e6);
+    gps_store->satellites = (uint8_t)gps.satellites.value();
+    gps_store->hdop = (uint16_t)gps.hdop.value();
+    gps_store->altitude = (int16_t)gps.altitude.meters();
+  }
 }
 
 // function to fetch current time from struct; note: this is costly
-time_t get_gpstime(gpsStatus_t value) {
+time_t fetch_gpsTime(uint16_t *msec) {
 
-  time_t t = timeIsValid(makeTime(value.timedate));
+  time_t time_sec = 0;
 
-  //  if (t)
-  //    t = value.time_age > nmea_txDelay_ms ? t : t - 1;
+  // poll NMEA $GPZDA sentence
+#ifdef GPS_SERIAL
+  GPS_Serial.print(ZDA_Request);
+  // wait for gps NMEA answer
+  vTaskDelay(tx_Ticks(NMEA_FRAME_SIZE, GPS_SERIAL));
+#elif defined GPS_I2C
+  Wire.print(ZDA_Request);
+#endif
 
-  // show NMEA data in verbose mode, useful for debugging GPS
-  ESP_LOGV(
-      TAG,
-      "GPS time: %d | GPS NMEA data: passed %d / failed: %d / with fix: %d", t,
-      gps.passedChecksum(), gps.failedChecksum(), gps.sentencesWithFix());
+  // did we get a current time?
+  if (gpstime.isUpdated() && gpstime.isValid()) {
 
-  return t;
+    tmElements_t tm;
 
-} // get_gpstime()
+    String rawtime = gpstime.value();
+    uint32_t time_bcd = rawtime.toFloat() * 100;
+    uint32_t delay_ms =
+        gpstime.age() + nmea_txDelay_ms + NMEA_COMPENSATION_FACTOR;
+    uint8_t year =
+        CalendarYrToTm(gps.date.year()); // year offset from 1970 in microTime.h
+
+    ESP_LOGD(TAG, "time [bcd]: %u", time_bcd);
+
+    tm.Second = (time_bcd / 100) % 100;   // second
+    tm.Minute = (time_bcd / 10000) % 100; // minute
+    tm.Hour = time_bcd / 1000000;         // hour
+    tm.Day = gps.date.day();              // day
+    tm.Month = gps.date.month();          // month
+    tm.Year = year;                       // year
+
+    // add protocol delay to time with millisecond precision
+    time_sec = makeTime(tm) + delay_ms / 1000;
+    *msec = (delay_ms % 1000) ? delay_ms % 1000 : 0;
+  }
+
+  return timeIsValid(time_sec);
+
+} // fetch_gpsTime()
+
+time_t fetch_gpsTime(void) {
+  uint16_t msec;
+  return fetch_gpsTime(&msec);
+}
 
 // GPS serial feed FreeRTos Task
 void gps_loop(void *pvParameters) {
@@ -116,8 +138,8 @@ void gps_loop(void *pvParameters) {
 
   while (1) {
 
-    if (cfg.payloadmask && GPS_DATA) {
-#if defined GPS_SERIAL
+    if (cfg.payloadmask & GPS_DATA) {
+#ifdef GPS_SERIAL
       // feed GPS decoder with serial NMEA data from GPS device
       while (GPS_Serial.available()) {
         gps.encode(GPS_Serial.read());
@@ -130,6 +152,11 @@ void gps_loop(void *pvParameters) {
       }
 #endif
     } // if
+
+    // show NMEA data in verbose mode, useful for debugging GPS
+    ESP_LOGV(TAG, "GPS NMEA data: passed %u / failed: %u / with fix: %u",
+             gps.passedChecksum(), gps.failedChecksum(),
+             gps.sentencesWithFix());
 
     delay(2); // yield to CPU
 

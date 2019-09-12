@@ -36,13 +36,19 @@ void irqHandler(void *pvParameters) {
 // display needs refresh?
 #ifdef HAS_DISPLAY
     if (InterruptStatus & DISPLAY_IRQ)
-      refreshtheDisplay();
+      refreshTheDisplay();
 #endif
 
-// gps refresh buffer?
-#if (HAS_GPS)
-    if (InterruptStatus & GPS_IRQ)
-      gps_storelocation(gps_status);
+// LED Matrix display needs refresh?
+#ifdef HAS_MATRIX_DISPLAY
+    if (InterruptStatus & MATRIX_DISPLAY_IRQ)
+      refreshTheMatrixDisplay();
+#endif
+
+// BME sensor data to be read?
+#if (HAS_BME)
+    if (InterruptStatus & BME_IRQ)
+      bme_storedata(&bme_status);
 #endif
 
     // are cyclic tasks due?
@@ -53,15 +59,19 @@ void irqHandler(void *pvParameters) {
     // is time to be synced?
     if (InterruptStatus & TIMESYNC_IRQ) {
       now(); // ensure sysTime is recent
-      time_t t = timeProvider();
-      if (timeIsValid(t))
-        setTime(t);
+      calibrateTime();
     }
+#endif
+
+// do we have a power event?
+#if (HAS_PMU)
+    if (InterruptStatus & PMU_IRQ)
+      pover_event_IRQ();
 #endif
 
     // is time to send the payload?
     if (InterruptStatus & SENDCYCLE_IRQ)
-      sendCounter();
+      sendData();
   }
 }
 
@@ -73,6 +83,17 @@ void IRAM_ATTR DisplayIRQ() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
   xTaskNotifyFromISR(irqHandlerTask, DISPLAY_IRQ, eSetBits,
+                     &xHigherPriorityTaskWoken);
+  if (xHigherPriorityTaskWoken)
+    portYIELD_FROM_ISR();
+}
+#endif
+
+#ifdef HAS_MATRIX_DISPLAY
+void IRAM_ATTR MatrixDisplayIRQ() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+  xTaskNotifyFromISR(irqHandlerTask, MATRIX_DISPLAY_IRQ, eSetBits,
                      &xHigherPriorityTaskWoken);
   if (xHigherPriorityTaskWoken)
     portYIELD_FROM_ISR();
@@ -91,26 +112,18 @@ void IRAM_ATTR ButtonIRQ() {
 }
 #endif
 
-#if (HAS_GPS)
-void IRAM_ATTR GpsIRQ() {
+#ifdef HAS_PMU
+void IRAM_ATTR PMUIRQ() {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-  xTaskNotifyFromISR(irqHandlerTask, GPS_IRQ, eSetBits,
+  xTaskNotifyFromISR(irqHandlerTask, PMU_IRQ, eSetBits,
                      &xHigherPriorityTaskWoken);
+
   if (xHigherPriorityTaskWoken)
     portYIELD_FROM_ISR();
 }
 #endif
 
-int mask_user_IRQ() {
-  // begin of time critical section: lock I2C bus to ensure accurate timing
-  if (!I2C_MUTEX_LOCK())
-    return 1; // failure
-  xTaskNotify(irqHandlerTask, MASK_IRQ, eSetBits);
-}
+void mask_user_IRQ() { xTaskNotify(irqHandlerTask, MASK_IRQ, eSetBits); }
 
-int unmask_user_IRQ() {
-  // end of time critical section: release I2C bus
-  I2C_MUTEX_UNLOCK();
-  xTaskNotify(irqHandlerTask, UNMASK_IRQ, eSetBits);
-}
+void unmask_user_IRQ() { xTaskNotify(irqHandlerTask, UNMASK_IRQ, eSetBits); }

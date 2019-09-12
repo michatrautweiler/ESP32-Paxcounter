@@ -8,6 +8,10 @@ static const char TAG[] = "flash";
 nvs_handle my_handle;
 esp_err_t err;
 
+#define PAYLOADMASK                                                            \
+  ((GPS_DATA | ALARM_DATA | MEMS_DATA | COUNT_DATA | SENSOR1_DATA |             \
+   SENSOR2_DATA | SENSOR3_DATA) & ~BATT_DATA)
+
 // populate cfg vars with factory settings
 void defaultConfig() {
   cfg.lorasf = LORASFDEFAULT; // 7-12, initial lora sf, see pacounter.conf
@@ -22,14 +26,14 @@ void defaultConfig() {
       WIFI_CHANNEL_SWITCH_INTERVAL; // wifi channel switch cycle [seconds/100]
   cfg.blescantime =
       BLESCANINTERVAL /
-      10;          // BT channel scan cycle [seconds/100], default 1 (= 10ms)
-  cfg.blescan = 0; // 0=disabled, 1=enabled
-  cfg.wifiant = 0; // 0=internal, 1=external (for LoPy/LoPy4)
-  cfg.vendorfilter = 1;       // 0=disabled, 1=enabled
-  cfg.rgblum = RGBLUMINOSITY; // RGB Led luminosity (0..100%)
-  cfg.monitormode = 0;        // 0=disabled, 1=enabled
-  cfg.runmode = 0;            // 0=normal, 1=update
-  cfg.payloadmask = 0xFF;     // all payload switched on
+      10; // BT channel scan cycle [seconds/100], default 1 (= 10ms)
+  cfg.blescan = BLECOUNTER;        // 0=disabled, 1=enabled
+  cfg.wifiant = 0;                 // 0=internal, 1=external (for LoPy/LoPy4)
+  cfg.vendorfilter = VENDORFILTER; // 0=disabled, 1=enabled
+  cfg.rgblum = RGBLUMINOSITY;      // RGB Led luminosity (0..100%)
+  cfg.monitormode = 0;             // 0=disabled, 1=enabled
+  cfg.runmode = 0;                 // 0=normal, 1=update
+  cfg.payloadmask = PAYLOADMASK;   // all payload switched on
   cfg.bsecstate[BSEC_MAX_STATE_BLOB_SIZE] = {
       0}; // init BSEC state for BME680 sensor
 

@@ -8,7 +8,7 @@ static const char TAG[] = __FILE__;
 // helper function
 void do_reset() {
   ESP_LOGI(TAG, "Remote command: restart device");
-#if(HAS_LORA)
+#if (HAS_LORA)
   LMIC_shutdown();
 #endif
   delay(3000);
@@ -127,12 +127,36 @@ void set_gps(uint8_t val[]) {
   if (val[0]) {
     cfg.payloadmask |= (uint8_t)GPS_DATA; // set bit in mask
   } else {
-    cfg.payloadmask &= ~(uint8_t)GPS_DATA; // clear bit in mask
+    cfg.payloadmask &= (uint8_t)~GPS_DATA; // clear bit in mask
   }
 }
 
+void set_bme(uint8_t val[]) {
+  ESP_LOGI(TAG, "Remote command: set BME mode to %s", val[0] ? "on" : "off");
+  if (val[0]) {
+    cfg.payloadmask |= (uint8_t)MEMS_DATA; // set bit in mask
+  } else {
+    cfg.payloadmask &= (uint8_t)~MEMS_DATA; // clear bit in mask
+  }
+}
+
+void set_batt(uint8_t val[]) {
+  ESP_LOGI(TAG, "Remote command: set battery mode to %s",
+           val[0] ? "on" : "off");
+  if (val[0]) {
+    cfg.payloadmask |= (uint8_t)BATT_DATA; // set bit in mask
+  } else {
+    cfg.payloadmask &= (uint8_t)~BATT_DATA; // clear bit in mask
+  }
+}
+
+void set_payloadmask(uint8_t val[]) {
+  ESP_LOGI(TAG, "Remote command: set payload mask to %X", val[0]);
+  cfg.payloadmask = val[0];
+}
+
 void set_sensor(uint8_t val[]) {
-#if(HAS_SENSORS)
+#if (HAS_SENSORS)
   switch (val[0]) { // check if valid sensor number 1...4
   case 1:
   case 2:
@@ -170,7 +194,7 @@ void set_monitor(uint8_t val[]) {
 }
 
 void set_lorasf(uint8_t val[]) {
-#if(HAS_LORA)
+#if (HAS_LORA)
   ESP_LOGI(TAG, "Remote command: set LoRa SF to %d", val[0]);
   switch_lora(val[0], cfg.txpower);
 #else
@@ -179,7 +203,7 @@ void set_lorasf(uint8_t val[]) {
 }
 
 void set_loraadr(uint8_t val[]) {
-#if(HAS_LORA)
+#if (HAS_LORA)
   ESP_LOGI(TAG, "Remote command: set LoRa ADR mode to %s",
            val[0] ? "on" : "off");
   cfg.adrmode = val[0] ? 1 : 0;
@@ -222,7 +246,7 @@ void set_rgblum(uint8_t val[]) {
 };
 
 void set_lorapower(uint8_t val[]) {
-#if(HAS_LORA)
+#if (HAS_LORA)
   ESP_LOGI(TAG, "Remote command: set LoRa TXPOWER to %d", val[0]);
   switch_lora(cfg.lorasf, val[0]);
 #else
@@ -239,20 +263,18 @@ void get_config(uint8_t val[]) {
 
 void get_status(uint8_t val[]) {
   ESP_LOGI(TAG, "Remote command: get device status");
-#ifdef BAT_MEASURE_ADC
-  uint16_t voltage = read_voltage();
-#else
-  uint16_t voltage = 0;
-#endif
   payload.reset();
-  payload.addStatus(voltage, uptime() / 1000, temperatureRead(), getFreeRAM(),
-                    rtc_get_reset_reason(0), rtc_get_reset_reason(1));
+  payload.addStatus(read_voltage(), uptime() / 1000, temperatureRead(),
+                    getFreeRAM(), rtc_get_reset_reason(0),
+                    rtc_get_reset_reason(1));
   SendPayload(STATUSPORT, prio_high);
 };
 
 void get_gps(uint8_t val[]) {
   ESP_LOGI(TAG, "Remote command: get gps status");
-#if(HAS_GPS)
+#if (HAS_GPS)
+  gpsStatus_t gps_status;
+  gps_storelocation(&gps_status);
   payload.reset();
   payload.addGPS(gps_status);
   SendPayload(GPSPORT, prio_high);
@@ -269,6 +291,17 @@ void get_bme(uint8_t val[]) {
   SendPayload(BMEPORT, prio_high);
 #else
   ESP_LOGW(TAG, "BME sensor not supported");
+#endif
+};
+
+void get_batt(uint8_t val[]) {
+  ESP_LOGI(TAG, "Remote command: get battery voltage");
+#if (defined BAT_MEASURE_ADC || defined HAS_PMU)
+  payload.reset();
+  payload.addVoltage(read_voltage());
+  SendPayload(BATTPORT, prio_normal);
+#else
+  ESP_LOGW(TAG, "Battery voltage not supported");
 #endif
 };
 
@@ -295,7 +328,7 @@ void set_flush(uint8_t val[]) {
 // format: opcode, function, #bytes params,
 // flag (true = do make settings persistent / false = don't)
 //
-cmd_t table[] = {
+static cmd_t table[] = {
     {0x01, set_rssi, 1, true},          {0x02, set_countmode, 1, true},
     {0x03, set_gps, 1, true},           {0x04, set_display, 1, true},
     {0x05, set_lorasf, 1, true},        {0x06, set_lorapower, 1, true},
@@ -305,16 +338,18 @@ cmd_t table[] = {
     {0x0d, set_vendorfilter, 1, false}, {0x0e, set_blescan, 1, true},
     {0x0f, set_wifiant, 1, true},       {0x10, set_rgblum, 1, true},
     {0x11, set_monitor, 1, true},       {0x12, set_beacon, 7, false},
-    {0x13, set_sensor, 2, true},        {0x80, get_config, 0, false},
-    {0x81, get_status, 0, false},       {0x84, get_gps, 0, false},
+    {0x13, set_sensor, 2, true},        {0x14, set_payloadmask, 1, true},
+    {0x15, set_bme, 1, true},           {0x16, set_batt, 1, true},
+    {0x80, get_config, 0, false},       {0x81, get_status, 0, false},
+    {0x83, get_batt, 0, false},         {0x84, get_gps, 0, false},
     {0x85, get_bme, 0, false},          {0x86, get_time, 0, false},
     {0x87, set_time, 0, false},         {0x99, set_flush, 0, false}};
 
-const uint8_t cmdtablesize =
+static const uint8_t cmdtablesize =
     sizeof(table) / sizeof(table[0]); // number of commands in command table
 
 // check and execute remote command
-void rcommand(uint8_t cmd[], uint8_t cmdlength) {
+void rcommand(const uint8_t cmd[], const uint8_t cmdlength) {
 
   if (cmdlength == 0)
     return;

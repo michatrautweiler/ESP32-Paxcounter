@@ -62,8 +62,9 @@ void DisplayKey(const uint8_t *key, uint8_t len, bool lsb) {
 void init_display(const char *Productname, const char *Version) {
 
   // block i2c bus access
-  if (I2C_MUTEX_LOCK()) {
-
+  if (!I2C_MUTEX_LOCK())
+    ESP_LOGV(TAG, "[%0.3f] i2c mutex lock failed", millis() / 1000.0);
+  else {
     // show startup screen
     uint8_t buf[32];
     u8x8.begin();
@@ -129,19 +130,21 @@ void init_display(const char *Productname, const char *Version) {
   }                     // mutex
 } // init_display
 
-void refreshtheDisplay(bool nextPage) {
+void refreshTheDisplay(bool nextPage) {
 
   static uint8_t DisplayPage = 0;
-  const time_t t =
-      myTZ.toLocal(now()); // note: call now() here *before* locking mutex!
 
   // if display is switched off we don't refresh it to relax cpu
   if (!DisplayIsOn && (DisplayIsOn == cfg.screenon))
     return;
 
-  // block i2c bus access
-  if (I2C_MUTEX_LOCK()) {
+  const time_t t =
+      myTZ.toLocal(now()); // note: call now() here *before* locking mutex!
 
+  // block i2c bus access
+  if (!I2C_MUTEX_LOCK())
+    ESP_LOGV(TAG, "[%0.3f] i2c mutex lock failed", millis() / 1000.0);
+  else {
     // set display on/off according to current device configuration
     if (DisplayIsOn != cfg.screenon) {
       DisplayIsOn = cfg.screenon;
@@ -160,13 +163,13 @@ void refreshtheDisplay(bool nextPage) {
   } // mutex
 } // refreshDisplay()
 
-void refreshtheDisplay() { refreshtheDisplay(false); }
-
 void draw_page(time_t t, uint8_t page) {
 
   char timeState, buff[16];
   uint8_t msgWaiting;
+#if (HAS_GPS)
   static bool wasnofix = true;
+#endif
 
   // update counter (lines 0-1)
   snprintf(
@@ -185,23 +188,20 @@ void draw_page(time_t t, uint8_t page) {
   case 0:
 
 // update Battery status (line 2)
-#ifdef BAT_MEASURE_ADC
+#if (defined BAT_MEASURE_ADC || defined HAS_PMU)
     u8x8.setCursor(0, 2);
     u8x8.printf("B:%.2fV", batt_voltage / 1000.0);
 #endif
 
 // update GPS status (line 2)
 #if (HAS_GPS)
-    // have we ever got valid gps data?
-    if (gps.passedChecksum() > 0) {
-      u8x8.setCursor(9, 2);
-      if (!gps.location.isValid()) // if no fix then display Sats value inverse
-      {
-        u8x8.setInverseFont(1);
-        u8x8.printf("Sats:%.2d", gps.satellites.value());
-        u8x8.setInverseFont(0);
-      } else
-        u8x8.printf("Sats:%.2d", gps.satellites.value());
+    u8x8.setCursor(9, 2);
+    if (gps.location.age() < 1500) // if no fix then display Sats value inverse
+      u8x8.printf("Sats:%.2d", gps.satellites.value());
+    else {
+      u8x8.setInverseFont(1);
+      u8x8.printf("Sats:%.2d", gps.satellites.value());
+      u8x8.setInverseFont(0);
     }
 #endif
 
@@ -249,12 +249,11 @@ void draw_page(time_t t, uint8_t page) {
     u8x8.setInverseFont(1);
     u8x8.printf("%c", timeState);
     u8x8.setInverseFont(0);
-    u8x8.printf(" %2d.%3s", day(t), printmonth[month(t)]);
 #else
-    u8x8.printf("%02d:%02d:%02d%c %2d.%3s", hour(t), minute(t), second(t),
-                timeState, day(t), printmonth[month(t)]);
+    u8x8.printf("%02d:%02d:%02d%c", hour(t), minute(t), second(t), timeState);
 #endif // HAS_DCF77 || HAS_IF482
-
+    if (timeSource != _unsynced)
+      u8x8.printf(" %2d.%3s", day(t), printmonth[month(t)]);
 #else // update LoRa status display
 #if (HAS_LORA)
     u8x8.printf("%-16s", display_line6);
@@ -307,12 +306,12 @@ void draw_page(time_t t, uint8_t page) {
         wasnofix = false;
       }
       // line 3-4: GPS latitude
-      snprintf(buff, sizeof(buff), "%c%-07.4f",
+      snprintf(buff, sizeof(buff), "%c%07.4f",
                gps.location.rawLat().negative ? 'S' : 'N', gps.location.lat());
       u8x8.draw2x2String(0, 3, buff);
 
       // line 6-7: GPS longitude
-      snprintf(buff, sizeof(buff), "%c%-07.4f",
+      snprintf(buff, sizeof(buff), "%c%07.4f",
                gps.location.rawLat().negative ? 'W' : 'E', gps.location.lng());
       u8x8.draw2x2String(0, 6, buff);
 
@@ -335,16 +334,16 @@ void draw_page(time_t t, uint8_t page) {
 
 #if (HAS_BME)
     // line 2-3: Temp
-    snprintf(buff, sizeof(buff), "TMP:%--4.1f", bme_status.temperature);
+    snprintf(buff, sizeof(buff), "TMP:%-2.1f", bme_status.temperature);
     u8x8.draw2x2String(0, 2, buff);
 
     // line 4-5: Hum
-    snprintf(buff, sizeof(buff), "HUM:%-4.1f", bme_status.humidity);
+    snprintf(buff, sizeof(buff), "HUM:%-2.1f", bme_status.humidity);
     u8x8.draw2x2String(0, 4, buff);
 
 #ifdef HAS_BME680
     // line 6-7: IAQ
-    snprintf(buff, sizeof(buff), "IAQ:%-4.1f", bme_status.iaq);
+    snprintf(buff, sizeof(buff), "IAQ:%-3.0f", bme_status.iaq);
     u8x8.draw2x2String(0, 6, buff);
 #endif
 

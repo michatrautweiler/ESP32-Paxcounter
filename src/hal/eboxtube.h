@@ -1,4 +1,7 @@
 // clang-format off
+// upload_speed 115200
+// board esp32dev
+
 
 #ifndef _EBOXTUBE_H
 #define _EBOXTUBE_H
@@ -11,7 +14,7 @@
 #define CFG_sx1276_radio 1
 
 #define HAS_LED (22)     // Green LED on board
-#define HAS_RGB_LED (2)  // WS2812B RGB LED on board
+#define HAS_RGB_LED SmartLed rgb_led(LED_WS2812, 1, GPIO_NUM_2) // WS2812B RGB LED on board
 #define HAS_BUTTON (0)   // button "FLASH" on board
 #define DISABLE_BROWNOUT 1      // comment out if you want to keep brownout feature
 

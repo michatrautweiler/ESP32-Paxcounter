@@ -28,9 +28,7 @@ licenses. Refer to LICENSE.txt file in repository for more details.
 
 esp_err_t spi_init();
 
-void spi_enqueuedata(MessageBuffer_t *message, sendprio_t prio);
+void spi_enqueuedata(MessageBuffer_t *message);
 void spi_queuereset();
-
-void spi_housekeeping();
 
 #endif // _SPISLAVE_H

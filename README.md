@@ -3,12 +3,16 @@
 
 Tutorial (in german language): https://www.heise.de/select/make/2019/1/1551099236518668
 
+**IMPORTANT: MUST USE PLATFORMIO V4 (not v3.x)**
+
 <img src="img/Paxcounter-title.jpg">
 <img src="img/Paxcounter-ttgo.jpg">
 <img src="img/Paxcounter-lolin.gif">
 <img src="img/Paxcounter-Screen.png">
 <img src="img/TTGO-case.jpg">
 <img src="img/TTGO-curves.jpg">
+<img src="img/Paxcounter-LEDmatrix.jpg">
+<img src="img/Paxcounter-Clock.png">
 
 # Use case
 
@@ -39,7 +43,8 @@ LoLin32lite + [LoraNode32-Lite shield](https://github.com/hallard/LoLin32-Lite-L
 *SPI only*:
 
 - Pyom: WiPy
-- WeMos: LoLin32, LoLin32 Lite, WeMos D32
+- WeMos: LoLin32, LoLin32 Lite, WeMos D32, [Wemos32 Oled](https://www.instructables.com/id/ESP32-With-Integrated-OLED-WEMOSLolin-Getting-Star/)
+- Crowdsupply: [TinyPICO](https://www.crowdsupply.com/unexpected-maker/tinypico)
 - Generic ESP32
 
 Depending on board hardware following features are supported:
@@ -54,6 +59,7 @@ Depending on board hardware following features are supported:
 - Real Time Clock (Maxim DS3231 I2C)
 - IF482 (serial) and DCF77 (gpio) time telegram generator
 - Switch external power / battery
+- LED Matrix display (similar to [this 64x16 model](https://www.instructables.com/id/64x16-RED-LED-Marquee/), can be ordered on [Aliexpress](https://www.aliexpress.com/item/P3-75-dot-matrix-led-module-3-75mm-high-clear-top1-for-text-display-304-60mm/32616683948.html))
 
 Target platform must be selected in [platformio.ini](https://github.com/cyberman54/ESP32-Paxcounter/blob/master/platformio.ini).<br>
 Hardware dependent settings (pinout etc.) are stored in board files in /hal directory. If you want to use a ESP32 board which is not yet supported, use hal file generic.h and tailor pin mappings to your needs. Pull requests for new boards welcome.<br>
@@ -73,6 +79,8 @@ By default bluetooth sniffing is disabled (#define *BLECOUNTER* 0 in paxcounter.
 # Preparing
 
 Before compiling the code,
+
+- **edit platformio.ini** and select desired hardware target in section boards. To add a new board, create an appropriate hardware abstraction layer file in hal subdirectory, and add a pointer to this file in sections boards.
 
 - **edit src/paxcounter.conf** and tailor settings in this file according to your needs and use case. Please take care of the duty cycle regulations of the LoRaWAN network you're going to use.
 
@@ -148,12 +156,12 @@ If you're using a device with OLED display, or if you add such one to the I2C bu
 
 You can add up to 3 user defined sensors. Insert sensor's payload scheme in [*sensor.cpp*](src/sensor.cpp). Bosch BME280 / BME680 environment sensors are supported. Enable flag *lib_deps_sensors* for your board in [*platformio.ini*](src/platformio.ini) and configure BME in board's hal file before build. If you need Bosch's proprietary BSEC libraray (e.g. to get indoor air quality value from BME680) further enable *build_flags_sensors*, which comes on the price of reduced RAM and increased build size. RTC DS3231, generic serial NMEA GPS, I2C LoPy GPS are supported, and to be configured in board's hal file. See [*generic.h*](src/hal/generic.h) for all options and for proper configuration of BME280/BME680.
 
-Output of user sensor data can be switched by user remote control command 0x13 sent to Port 2. 
+Output of user sensor data can be switched by user remote control command 0x14 sent to Port 2. 
 
-Output of sensor and peripheral data is internally switched by a bitmask register. Default mask (0xFF) can be tailored by editing *cfg.payloadmask* initialization value in [*configmanager.cpp*](src/configmanager.cpp) following this scheme:
+Output of sensor and peripheral data is internally switched by a bitmask register. Default mask can be tailored by editing *cfg.payloadmask* initialization value in [*configmanager.cpp*](src/configmanager.cpp) following this scheme:
 
 | Bit | Sensordata    |
-|-----|---------------|
+| --- | ------------- |
 | 0   | GPS           |
 | 1   | Beacon alarm  |
 | 2   | BME280/680    |
@@ -161,7 +169,7 @@ Output of sensor and peripheral data is internally switched by a bitmask registe
 | 4   | User sensor 1 |
 | 5   | User sensor 2 |
 | 6   | User sensor 3 |
-| 7   | reserved      |
+| 7   | Batterylevel  |
 
 
 # Time sync
@@ -375,17 +383,35 @@ Note: all settings are stored in NVRAM and will be reloaded when device starts.
 	byte 1 = user sensor number (1..3)
 	byte 2 = sensor mode (0 = disabled / 1 = enabled [default])
 
+0x14 set payload mask
+
+	byte 1 = sensor data payload mask (0..255, meaning of bits see above)
+
+0x15 set BME data on/off
+
+	0 = BME data off
+	1 = BME data on, sends BME data on port 7 [default]
+
+0x16 set battery data on/off
+
+	0 = battery data off [default]
+	1 = battery data on, sends voltage on port 8
+
 0x80 get device configuration
 
 	Device answers with it's current configuration on Port 3. 
 
 0x81 get device status
 
-	Device answers with it's current status on Port 2. 
+	Device answers with it's current status on Port 2.
+
+0x83 get battery status
+
+	Device answers with battery voltage on Port 8.
 	
 0x84 get device GPS status
 
-	Device answers with it's current status on Port 4. 
+	Device answers with it's current status on Port 4.
 
 0x85 get BME280 / BME680 sensor data
 
@@ -398,16 +424,16 @@ Note: all settings are stored in NVRAM and will be reloaded when device starts.
 	bytes 1..4 = time/date in UTC epoch seconds (LSB)
 	byte 5 = time source & status, see below
 	
-		bits 0..3 time source
+		bits 0..3 last seen time source
 			0x00 = GPS
 			0x01 = RTC
 			0x02 = LORA
-			0x03 = unsynched
+			0x03 = unsynched (never synched)
 	
 		bits 4..7 time status
 			0x00 = timeNotSet (never synched)
-			0x10 = timeNeedsSync (last sync failed)
-			0x20 = timeSet (synched)
+			0x01 = timeNeedsSync (last sync failed)
+			0x02 = timeSet (synched)
 
 0x87 set time/date
 
