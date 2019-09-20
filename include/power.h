@@ -16,8 +16,9 @@ void AXP192_power(bool on);
 #endif
 
 void AXP192_init(void);
+void AXP192_displaypower(void);
 uint16_t read_voltage(void);
 void calibrate_voltage(void);
-uint8_t getBattLevel(void);
+bool batt_sufficient(void);
 
 #endif

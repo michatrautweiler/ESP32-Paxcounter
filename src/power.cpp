@@ -16,9 +16,10 @@ void pover_event_IRQ(void) {
     // put your power event handler code here
 
     if (pmu.isVbusOverVoltageIRQ())
-      ESP_LOGI(TAG, "USB voltage too high.");
+      ESP_LOGI(TAG, "USB voltage %.1fV too high.", pmu.getVbusVoltage());
     if (pmu.isVbusPlugInIRQ())
-      ESP_LOGI(TAG, "USB plugged.");
+      ESP_LOGI(TAG, "USB plugged, %.0fmAh @ %.1fV", pmu.getVbusCurrent(),
+               pmu.getVbusVoltage());
     if (pmu.isVbusRemoveIRQ())
       ESP_LOGI(TAG, "USB unplugged.");
 
@@ -27,7 +28,7 @@ void pover_event_IRQ(void) {
     if (pmu.isBattRemoveIRQ())
       ESP_LOGI(TAG, "Battery was removed.");
     if (pmu.isChargingIRQ())
-      ESP_LOGI(TAG, "Battery is charging.");
+      ESP_LOGI(TAG, "Battery charging.");
     if (pmu.isChargingDoneIRQ())
       ESP_LOGI(TAG, "Battery charging done.");
     if (pmu.isBattTempLowIRQ())
@@ -74,6 +75,23 @@ void AXP192_power(bool on) {
   }
 }
 
+void AXP192_displaypower(void) {
+  if (pmu.isBatteryConnect())
+    if (pmu.isChargeing())
+      ESP_LOGI(TAG, "Battery charging %.0fmAh @ Temp %.1f°C",
+               pmu.getBattChargeCurrent(), pmu.getTSTemp());
+    else
+      ESP_LOGI(TAG, "Battery not charging, Temp %.1f°C", pmu.getTSTemp());
+  else
+    ESP_LOGI(TAG, "No Battery");
+
+  if (pmu.isVBUSPlug())
+    ESP_LOGI(TAG, "USB present, %.0fmAh @ %.1fV", pmu.getVbusCurrent(),
+             pmu.getVbusVoltage());
+  else
+    ESP_LOGI(TAG, "USB not present");
+}
+
 void AXP192_init(void) {
 
   // block i2c bus access
@@ -89,8 +107,7 @@ void AXP192_init(void) {
       AXP192_power(true);
 
       // I2C access of AXP202X library currently is not mutexable
-      // so we need to disable AXP interrupts
-
+      // so we better should disable AXP interrupts... ?
 #ifdef PMU_INT
       pinMode(PMU_INT, INPUT_PULLUP);
       attachInterrupt(digitalPinToInterrupt(PMU_INT), PMUIRQ, FALLING);
@@ -100,15 +117,8 @@ void AXP192_init(void) {
       pmu.clearIRQ();
 #endif // PMU_INT
 
-      ESP_LOGI(TAG, "AXP192 PMU initialized.");
-
-      if (pmu.isBatteryConnect())
-        if (pmu.isChargeing())
-          ESP_LOGI(TAG, "Battery deteced, charging.");
-        else
-          ESP_LOGI(TAG, "Battery deteced, not charging.");
-      else
-        ESP_LOGI(TAG, "No Battery deteced.");
+      ESP_LOGI(TAG, "AXP192 PMU initialized, chip Temp %.1f°C", pmu.getTemp());
+      AXP192_displaypower();
     }
     I2C_MUTEX_UNLOCK(); // release i2c bus access
   } else
@@ -157,31 +167,15 @@ void calibrate_voltage(void) {
 #endif
 }
 
-uint8_t getBattLevel() {
-  /*
-  return values:
-  MCMD_DEVS_EXT_POWER   = 0x00, // external power supply
-  MCMD_DEVS_BATT_MIN    = 0x01, // min battery value
-  MCMD_DEVS_BATT_MAX    = 0xFE, // max battery value
-  MCMD_DEVS_BATT_NOINFO = 0xFF, // unknown battery level
-  */
+bool batt_sufficient() {
 #if (defined HAS_PMU || defined BAT_MEASURE_ADC)
-  uint16_t voltage = read_voltage();
-
-  switch (voltage) {
-  case 0:
-    return MCMD_DEVS_BATT_NOINFO;
-  case 0xffff:
-    return MCMD_DEVS_EXT_POWER;
-  default:
-    return (voltage > OTA_MIN_BATT ? MCMD_DEVS_BATT_MAX : MCMD_DEVS_BATT_MIN);
-  }
-#else // we don't have any info on battery level
-  return MCMD_DEVS_BATT_NOINFO;
+  uint16_t volts = read_voltage();
+  return ((volts < 1000) ||
+          (volts > OTA_MIN_BATT)); // no battery or battery sufficient
+#else
+  return true;
 #endif
-} // getBattLevel()
-
-// u1_t os_getBattLevel(void) { return getBattLevel(); };
+}
 
 uint16_t read_voltage() {
 
